@@ -1,0 +1,102 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <SoftwareSerial.h>
+
+const char* ssid = "SNUC";
+const char* password = "snu12345";
+
+const char* mqtt_server = "broker.emqx.io";
+const char* mqtt_topic = "stm32/tof/data";
+
+SoftwareSerial stmSerial(D5, D6); // RX, unused TX
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+char incoming[240];
+size_t pos = 0;
+
+unsigned long lastRetry = 0;
+
+void setup()
+{
+    Serial.begin(115200);
+    stmSerial.begin(9600);
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, password);
+
+    client.setServer(mqtt_server, 1883);
+    client.setBufferSize(512);
+
+    Serial.println("Wemos MQTT bridge started");
+}
+
+void loop()
+{
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        if (millis() - lastRetry >= 5000)
+        {
+            lastRetry = millis();
+            WiFi.reconnect();
+        }
+    }
+    else if (!client.connected())
+    {
+        if (millis() - lastRetry >= 5000)
+        {
+            lastRetry = millis();
+
+            String id = "WemosTOF-";
+            id += String(ESP.getChipId(), HEX);
+
+            if (client.connect(id.c_str()))
+                Serial.println("MQTT Connected!");
+            else
+                Serial.println("MQTT reconnect failed");
+        }
+    }
+
+    if (client.connected())
+        client.loop();
+
+    while (stmSerial.available())
+    {
+        char c = stmSerial.read();
+
+        if (c == '\n')
+        {
+            incoming[pos] = '\0';
+
+            if (pos > 0)
+            {
+                Serial.print("STM32: ");
+                Serial.println(incoming);
+
+                if (client.connected())
+                {
+                    if (client.publish(mqtt_topic, incoming))
+                        Serial.println("Published to MQTT!");
+                    else
+                        Serial.println("Publish failed");
+                }
+                else
+                {
+                    Serial.println("MQTT offline; message skipped");
+                }
+            }
+
+            pos = 0;
+        }
+        else if (c != '\r')
+        {
+            if (pos < sizeof(incoming) - 1)
+                incoming[pos++] = c;
+            else
+                pos = 0;
+        }
+    }
+
+    yield();
+}
